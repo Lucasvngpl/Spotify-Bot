@@ -1,0 +1,84 @@
+
+import os
+import asyncio
+from typing import List
+import pandas as pd
+import discord
+import random
+from random import choice, randint
+from discord.ext import commands
+# from dotenv import load_dotenv
+# import nltk
+# nltk.download('wordnet')
+# nltk.download('wordnet')
+from dotenv import load_dotenv
+from transformers import pipeline
+from surprise import Dataset, Reader, SVD
+#qa = pipeline('question-answering')
+#ned to define context and question and answer=qa(question=question, context=context)
+#question could be message.content[len('/ask '):]
+
+# from nltk import chat
+
+load_dotenv()
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.presences = True
+load_dotenv()
+TOKEN = os.getenv('DISCORD_TOKEN')
+GUILD = os.getenv('DISCORD_GUILD')
+
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+
+def get_responses(user_input: str) -> str:
+    lowered: str = user_input.lower()
+    response_favorite_song = [
+        'Today it is house music',
+        'Depends on the day',
+        'Ever tried prog rock?',
+        (
+            "Yesterday it was 90's boom bap"
+        )]
+
+    if lowered == "":
+        return "You're silent..."
+    elif 'hello' in lowered:
+        return "Hello!"
+    elif 'how are you' in lowered:
+        return 'Good, thanks!'
+    elif 'bye' in lowered:
+        return 'See you!'
+    elif 'roll dice' in lowered:
+        return f'You rolled: {randint(1, 6)}'
+    elif "What kind of music do you like?" or "What kind of music do you like!" in lowered:
+        return random.choice(response_favorite_song)
+    else:
+        return choice(['I do not understand...', 'What are you talking about?', 'Do you mind rephrasing that?'])
+
+
+# Event triggered when the bot is ready and connected to Discord
+@bot.event
+async def on_ready():
+    print(f'We have logged in as {bot.user}')
+
+
+# Event triggered whenever a message is sent in a channel
+@bot.event
+async def on_message(message):
+    # Ignore messages sent by the bot itself
+    if message.author == bot.user:
+        return
+
+    # Generate a response based on the message content
+    response = get_responses(message.content)
+    # Send the response back to the channel
+    await message.channel.send(response)
+    # This line allows other commands to be processed if they exist
+    await bot.process_commands(message)  # This allows commands to be processed if there are any
+
+
+# Run the bot using the token
+bot.run(TOKEN)
