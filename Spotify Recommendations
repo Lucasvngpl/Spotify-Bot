@@ -1,84 +1,324 @@
-
-import os
+import json
 import asyncio
+from surprise import Dataset, Reader, SVD
+from transformers import pipeline
 from typing import List
 import pandas as pd
-import discord
+import os
+import base64
 import random
 from random import choice, randint
+from requests import post, get
+import discord
 from discord.ext import commands
-# from dotenv import load_dotenv
-# import nltk
-# nltk.download('wordnet')
-# nltk.download('wordnet')
 from dotenv import load_dotenv
-from transformers import pipeline
-from surprise import Dataset, Reader, SVD
-#qa = pipeline('question-answering')
-#ned to define context and question and answer=qa(question=question, context=context)
-#question could be message.content[len('/ask '):]
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+import openai
+from fuzzywuzzy import process
+import logging
 
-# from nltk import chat
+from flask import Flask, request, redirect
 
+# Load environment variables from .env file
 load_dotenv()
 
+# Set up Discord bot intents
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.presences = True
-load_dotenv()
-TOKEN = os.getenv('DISCORD_TOKEN')
-GUILD = os.getenv('DISCORD_GUILD')
 
+# Get the Discord bot token and other secrets from environment variables
+TOKEN = 'YOUR TOKEN'
+GUILD = "Lucas's bot server"
+client_id = "YOUR CLIENT ID"
+client_secret = "YOUR CLIENT SECRET"
+SPOTIPY_REDIRECT_URI = "https://discord.gg/TuCGVjBDtp"
+openai_api_key = "OPENAI_API_KEY"
+# Spotify OAuth setup
+scope = 'playlist-modify-public playlist-modify-private'
+sp_oauth = SpotifyOAuth(client_id=client_id, client_secret=client_secret, redirect_uri=SPOTIPY_REDIRECT_URI,
+                        scope=scope)
+
+openai.api_key = openai_api_key
+# Initialize Flask app for handling Spotify OAuth
+app = Flask(__name__)
+auth_manager = SpotifyOAuth(client_id=client_id, client_secret=client_secret, redirect_uri=SPOTIPY_REDIRECT_URI, scope='playlist-modify-public playlist-modify-private')
+
+# Store the Spotify token information
+token_info = None
+
+@app.route('/callback')
+def callback():
+    global token_info
+    token_info = auth_manager.get_access_token(request.args['code'])
+    return redirect('/success')
+
+@app.route('/success')
+def success():
+    return "Spotify authentication successful! You can now return to Discord."
+
+def get_spotify_client():
+    global token_info
+    if token_info:
+        if auth_manager.is_token_expired(token_info):
+            token_info = auth_manager.refresh_access_token(token_info['refresh_token'])
+        return spotipy.Spotify(auth=token_info['access_token'])
+    else:
+        return None
+
+# Function to get a Spotify access token
+def get_token():
+    # Combine client ID and client secret and encode to base64
+    authorization_string = client_id + ":" + client_secret
+    auth_bytes = authorization_string.encode("utf-8")
+    auth_base64 = str(base64.b64encode(auth_bytes), "utf-8")
+
+    # Spotify token endpoint
+    url = "https://accounts.spotify.com/api/token"
+
+    # Headers and data for the POST request to get the access token
+    headers = {
+        "Authorization": "Basic " + auth_base64,
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    data = {"grant_type": "client_credentials"}
+
+    # Send POST request to Spotify API
+    result = post(url, headers=headers, data=data)
+
+    # Check if the request was successful
+    if result.status_code != 200:
+        print(f"Error: Unable to fetch token, status code {result.status_code}")
+        print(result.content)  # Print the error response for debugging
+        return None
+
+    # Parse the JSON response
+    json_result = json.loads(result.content)
+
+    # Check if 'access_token' is in the response
+    if "access_token" not in json_result:
+        print("Error: 'access_token' not found in the response")
+        print(json_result)  # Print the full response for debugging
+        return None
+
+    # Extract and return the access token
+    token = json_result["access_token"]
+    return token
+
+
+# Function to create authorization headers using the access token
+def get_auth_headers(token):
+    return {"Authorization": "Bearer " + token}
+
+
+# Get the access token
+find_token = get_token()
+
+# Check if the access token was retrieved successfully
+if find_token is None:
+    print("Failed to retrieve access token.")
+else:
+    print(find_token)  # Print the access token for verification
+
+# Create a bot instance with the specified command prefix and intents
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 
-def get_responses(user_input: str) -> str:
-    lowered: str = user_input.lower()
-    response_favorite_song = [
-        'Today it is house music',
-        'Depends on the day',
-        'Ever tried prog rock?',
-        (
-            "Yesterday it was 90's boom bap"
-        )]
+def search_for_artists(token, artist):
+    url = "https://api.spotify.com/v1/search"
+    headers = get_auth_headers(token)
+    query = f"q={artist}&type=artist&limit=1"
+    query_url = url + "?" + query
+    result = get(query_url, headers=headers)
+    json_result = json.loads(result.content)["artists"]["items"]
+    # scans through dictionary of info for name and finds items
+    if len(json_result) == 0:
+        print("No artist with this name can be found")
+        return None
+    return json_result[0]
 
-    if lowered == "":
-        return "You're silent..."
-    elif 'hello' in lowered:
-        return "Hello!"
-    elif 'how are you' in lowered:
-        return 'Good, thanks!'
-    elif 'bye' in lowered:
-        return 'See you!'
-    elif 'roll dice' in lowered:
-        return f'You rolled: {randint(1, 6)}'
-    elif "What kind of music do you like?" or "What kind of music do you like!" in lowered:
-        return random.choice(response_favorite_song)
+
+def get_top_tracks(token, artist_id):
+    url = f"https://api.spotify.com/v1/artists/{artist_id}/top-tracks?country=US"
+    headers = get_auth_headers(token)
+    result = get(url, headers=headers)
+    json_result = json.loads(result.content)["tracks"]
+    return json_result
+
+
+def get_related_artists(token, artist_id):
+    url = f"https://api.spotify.com/v1/artists/{artist_id}/related-artists"
+    headers = get_auth_headers(token)
+    result = get(url, headers=headers)
+    json_result = json.loads(result.content)["artists"]
+    return json_result
+
+
+def create_playlist(spotify, user_id, artist_id, playlist_name, is_public=True):
+    track_uris = []
+    track_uris = track_uris[:8]
+    token = get_token()
+    related_artists = get_related_artists(token, artist_id)
+    for artist in related_artists[:10]:
+        top_tracks = get_top_tracks(token, artist['id'])
+        for track in top_tracks:
+            track_uris.append(track['id'])
+    playlist = spotify.user_playlist_create(user=user_id, name=playlist_name, public=is_public)
+    spotify.user_playlist_add_tracks(user=user_id, playlist_id=playlist['id'], tracks=track_uris)
+    print(f"\n\"{playlist_name}\" playlist created successfully.")
+    return playlist['external_urls']['spotify']
+
+
+class playlist_Button_View(discord.ui.View):
+    def __init__(self, spotify, user_id, artist_id, playlist_name) -> None:
+        # Added __init__ method to accept spotify, user_id, artist_id, and playlist_name.
+        super().__init__()
+        self.value = None
+        self.spotify = spotify
+        self.user_id = user_id
+        self.artist_id = artist_id
+        self.playlist_name = playlist_name
+
+    @discord.ui.button(label="❌️", row=1, style=discord.ButtonStyle.blurple)
+    async def rate_one(self, button: discord.ui.Button, interaction: discord.Interaction) -> None:
+        self.value = 0
+
+        self.stop()
+
+    @discord.ui.button(label="✅", row=1, style=discord.ButtonStyle.blurple)
+    async def rate_two(self, button: discord.ui.Button, interaction: discord.Interaction) -> None:
+        self.value = 1
+        self.stop()
+#replace this with simple yes or no
+
+
+@bot.command(name='Music-Recommendations')
+async def get_artist_info(ctx):
+    await ctx.send("What artist are you looking for?")
+
+    def check(msg):
+        return msg.author == ctx.author and msg.channel == ctx.channel
+
+    msg = await bot.wait_for("message", check=check)
+    artist = str(msg.content)
+    token = get_token()
+    info = search_for_artists(token, artist)
+
+    if info:
+        artist_id = info["id"]
+        top_tracks = get_top_tracks(token, artist_id)
+        related_artists = get_related_artists(token, artist_id)
+        related_artists = related_artists[:5]
+        if top_tracks:
+            await ctx.send(f"Got it, check out these top tracks in North America -")
+            for idx, track in enumerate(top_tracks):
+                await ctx.send(f"{idx + 1}. {track['name']}")
+        else:
+            await ctx.send(f"No tracks found")
+        if related_artists:
+            await ctx.send(f"\n"
+                           f"You might also want to check out these artists:")
+            for idx, artist in enumerate(related_artists):
+                await ctx.send(f"{idx + 1}. {artist['name']}")
+                # Get Spotify user info
+            spotify = get_spotify_client()
+            if spotify is None:
+                auth_url = auth_manager.get_authorize_url()
+                await ctx.send(f"Please authenticate with Spotify: {auth_url}")
+                return
+            user = spotify.current_user()
+            user_id = user['id']
+            # Add a message to prompt for playlist creation
+            # await ctx.send("Would you like to create a playlist with these artists' top tracks?",
+            # view=playlist_Button_View(spotify, user_id, artist_id, "Recommended Playlist"))
+            playlist_name = "Music Recommendations"
+            buttons = playlist_Button_View(spotify, user_id, artist_id, playlist_name)
+            embed = discord.Embed(
+                description="Would you like to create a playlist of song recommendations similar to the artist?",
+                color=0xBEBEFE)
+            await ctx.send(embed=embed, view=buttons)
+            await buttons.wait()
+            playlist_url = create_playlist(spotify, user_id, artist_id, playlist_name)
+            #print(playlist_url)
+
+            if buttons.value == 1:
+                await ctx.send(f"Playlist created successfully! [Listen here]({playlist_url})",
+                               ephemeral=True)
+            else:
+                await ctx.send("Playlist creation cancelled.")
+
+
+
     else:
-        return choice(['I do not understand...', 'What are you talking about?', 'Do you mind rephrasing that?'])
+        await ctx.send(f"No artist found")
 
 
-# Event triggered when the bot is ready and connected to Discord
-@bot.event
-async def on_ready():
-    print(f'We have logged in as {bot.user}')
+# @bot.command(name='chat')
+# async def get_responses(ctx):
+#     response_favorite_song = [
+#         'Today it is house music',
+#         'Depends on the day',
+#         'Ever tried prog rock?',
+#         "Yesterday it was 90's boom bap"
+#     ]
+#
+#     def check(msg):
+#         return msg.author == ctx.author and msg.channel == ctx.channel
+#
+#     msg = await bot.wait_for("message", check=check)
+#     lowered = msg.content.lower()  # Extract message content and convert to lowercase
+#     if lowered == "":
+#         await ctx.send("You're silent...")
+#     elif 'hello' in lowered:
+#         await ctx.send("Hello!")
+#     elif 'how are you' in lowered:
+#         await ctx.send('Good, thanks!')
+#     elif 'bye' in lowered:
+#         await ctx.send('See you!')
+#     elif 'roll dice' in lowered:
+#         await ctx.send(f'You rolled: {randint(1, 6)}')
+#     elif "what kind of music do you like" in lowered:
+#         ran = random.choice(response_favorite_song)
+#         await ctx.send(f"{ran}")
+#     else:
+#         await ctx.send("Do you mind rephrasing that?")
 
 
-# Event triggered whenever a message is sent in a channel
-@bot.event
-async def on_message(message):
-    # Ignore messages sent by the bot itself
-    if message.author == bot.user:
-        return
+# Chatbot command
+def chatgpt_response(prompt):
+    response = openai.Completion.create(
+        model="gpt-3.5-turbo",
+        max_tokens=50,
+        messages=[
+            {f"role": "user", "content": prompt}
+        ]
+    )
+    response_dictionary = response.get("choices")
+    if response_dictionary and len(response_dictionary) > 0:
+        response_message = response.choices[0].message['content']
+        return response_message
+    return "I couldn't generate a response."
 
-    # Generate a response based on the message content
-    response = get_responses(message.content)
-    # Send the response back to the channel
-    await message.channel.send(response)
-    # This line allows other commands to be processed if they exist
-    await bot.process_commands(message)  # This allows commands to be processed if there are any
+
+@bot.command(name='question')
+async def question(ctx, *, message):
+    bot_response = chatgpt_response(prompt=message)
+    await ctx.send(f"Answer: {bot_response}")
 
 
-# Run the bot using the token
+# now make it a playlist, get rid of unessecary info and clarity
+# next step would be using llm to be conversational, generate text based on question, and use interpret function
+# so that it interprets anything similar to music recommendations and if its anything diff goes down diff path
+# and just answers the question so if its like whose a popular artist that doesn't have to do with recommendations
+# so goes down other path and actually just like enters it as a prompt in llm, or pipelines question answering
+
+# puts it in readable list, adds on to index so it doesn't start at 0 and starts at 1
+# add hugging face
+#For some reason link sends me to redirect, and thinks the playlist is a user input
+
+#from stack overflow try user.user_playlist_create(user=cred.user_name, name=playlist_name)
+# Start the bot
 bot.run(TOKEN)
+#problem is its sending me to redirect url instead of playlist
