@@ -31,7 +31,7 @@ intents.presences = True
 
 # Get the Discord bot token and other secrets from environment variables
 TOKEN = 'YOUR TOKEN'
-GUILD = "Lucas's bot server"
+GUILD = "YOUR SERVER NAME"
 client_id = "YOUR CLIENT ID"
 client_secret = "YOUR CLIENT SECRET"
 SPOTIPY_REDIRECT_URI = "https://discord.gg/TuCGVjBDtp"
